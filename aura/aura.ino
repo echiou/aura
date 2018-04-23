@@ -6,17 +6,20 @@
 
 #define DEVICE_NAME               ("A U R A")
 #define SECOND_MS                 (1000)
+#define RSSI_LIM                  (-70)
+#define DELTA_TIME_LIM_MS         (10000)
 
 // Neopixel
 #define NEOPIXEL_COUNT            (3)
 #define NEOPIXEL_PIN              (16)
-#define NEOPIXEL_PX_TYPE          NEO_GRB + NEO_KHZ800
+#define NEOPIXEL_PX_TYPE          (NEO_GRB + NEO_KHZ800)
 
+// Neopixel pulsing
 #define PULSE_UPDATE_INTERVAL_MS  (5)
 #define PULSE_LENGTH_MS           (2 * SECOND_MS)
 #define PULSE_START_PERCENT       (0.7) // Chance for pulse to start every second.
 
-typedef struct neopixel_pulse_state {
+typedef struct neopixel_pulse_state_t {
   uint8_t neopixel_num;
   uint8_t pulse_color[3];
   unsigned long pulse_length_ms;
@@ -24,23 +27,27 @@ typedef struct neopixel_pulse_state {
   bool pulsing;
   unsigned long start_time;
   unsigned long last_rand_check;
-} neopixel_pulse_state;
+} neopixel_pulse_state_t;
 
 unsigned long neopixel_pulse_last_update;
-neopixel_pulse_state neopixel_pulse_states[3];
-void neopixel_pulse_start(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state* pulse_state);
-void neopixel_pulse_update(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state* pulse_state);
+neopixel_pulse_state_t neopixel_pulse_states[3];
+void neopixel_pulse_start(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state_t* pulse_state);
+void neopixel_pulse_update(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state_t* pulse_state);
 
 Adafruit_NeoPixel neopixels = Adafruit_NeoPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEOPIXEL_PX_TYPE);
 
 // Bluefruit
-unsigned long bluefruit_last_dev_found;
+unsigned long bluefruit_last_dev_found_t;
+int8_t bluefruit_last_dev_found_rssi;
 void bluefruit_start_adv(void);
 void bluefruit_scan_callback(ble_gap_evt_adv_report_t* report);
+
+// Misc utilities
 
 void setup()
 {
   Serial.begin(115200);
+  Serial.println("Beginning serial...");
 
   // Set up neopixels
   neopixels.begin();
@@ -65,7 +72,8 @@ void setup()
   Bluefruit.setTxPower(4);
   Bluefruit.autoConnLed(false);
 
-  bluefruit_last_dev_found = millis();
+  bluefruit_last_dev_found_t = millis();
+  bluefruit_last_dev_found_rssi = 0;
   /* Start Central Scanning
    * - Interval = 100 ms, window = 80 ms
    * - Start(timeout) with timeout = 0 will scan forever (until connected)
@@ -88,13 +96,31 @@ void loop()
       if (neopixel_pulse_states[i].pulsing) {
         neopixel_pulse_update(&neopixels, &neopixel_pulse_states[i]);
       } else {
-        if (cur_time - neopixel_pulse_states[i].last_rand_check > SECOND_MS) {
+        if (neopixel_pulse_states[i].last_rand_check < cur_time && (cur_time - neopixel_pulse_states[i].last_rand_check) > SECOND_MS) {
           neopixel_pulse_states[i].last_rand_check = cur_time;
           if (random(0, 100) < PULSE_START_PERCENT * 100) {
+            int16_t blue_val = 255;
+            if (bluefruit_last_dev_found_rssi < RSSI_LIM) {
+              int8_t rssi_diff = RSSI_LIM - bluefruit_last_dev_found_rssi;
+              Serial.printf("RSSI_DIFF %d\r\n", rssi_diff);
+              blue_val -= rssi_diff * 10;
+            }
+
+            unsigned long delta_time = cur_time - bluefruit_last_dev_found_t;
+            if (delta_time > DELTA_TIME_LIM_MS) {
+              unsigned long time_diff = delta_time - DELTA_TIME_LIM_MS;
+              Serial.printf("TIME_DIFF %d\r\n", time_diff);
+              blue_val -= time_diff * 0.005;
+            }
+
+            Serial.printf("bv %d\r\n", blue_val);
+            if (blue_val < 0) {
+              blue_val = 0;
+            }
             uint8_t rand_color = random(0, 255);
-            neopixel_pulse_states[i].pulse_color[0] = 0;
-            neopixel_pulse_states[i].pulse_color[1] = rand_color;
-            neopixel_pulse_states[i].pulse_color[2] = 255 - rand_color;
+            neopixel_pulse_states[i].pulse_color[0] = 255 - blue_val;
+            neopixel_pulse_states[i].pulse_color[1] = 0;
+            neopixel_pulse_states[i].pulse_color[2] = blue_val;
             neopixel_pulse_states[i].pulse_length_ms = PULSE_LENGTH_MS;
             neopixel_pulse_start(&neopixels, &neopixel_pulse_states[i]);
           }
@@ -103,8 +129,6 @@ void loop()
     }
     neopixels.show();
   }
-        
-  // Check lastTimeFound and lastRSSI, depending on each change colors from red -> blue
 }
 
 // Bluefruit functions
@@ -133,28 +157,27 @@ void bluefruit_scan_callback(ble_gap_evt_adv_report_t* report)
   {
     if (String((char *)buffer).indexOf(DEVICE_NAME) >= 0) {
       unsigned long time_found = millis();
-      unsigned long time_diff = time_found - bluefruit_last_dev_found;
-      bluefruit_last_dev_found = time_found;
-      // Update lastTimeFound, RSSI
-      Serial.printf("Found %s with RSSI: %d, last seen %lu ms ago. Time is %lu\r\n", DEVICE_NAME, report->rssi, time_diff, time_found);
+      Serial.printf("Found %s with RSSI: %d, last seen %lu ms ago. Time is %lu\r\n", DEVICE_NAME, report->rssi, time_found - bluefruit_last_dev_found_t, time_found);
+      bluefruit_last_dev_found_t = time_found;
+      bluefruit_last_dev_found_rssi = report->rssi;
     }
   }
 }
 
-void neopixel_pulse_start(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state* pulse_state)
+void neopixel_pulse_start(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state_t* pulse_state)
 {
   neopixels->setPixelColor(pulse_state->neopixel_num, neopixels->Color(0, 0, 0));
   pulse_state->start_time = millis();
   pulse_state->pulsing = true;
 }
 
-void neopixel_pulse_update(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state* pulse_state)
+void neopixel_pulse_update(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_state_t* pulse_state)
 {
   unsigned long cur_time = millis();
   if (pulse_state->pulsing == false || pulse_state->start_time + pulse_state->pulse_length_ms < cur_time) {
     neopixels->setPixelColor(pulse_state->neopixel_num, neopixels->Color(0, 0, 0));
     pulse_state->pulsing = false;
-    pulse_state->last_rand_check = cur_time + random(-500, 500);
+    pulse_state->last_rand_check = cur_time + random(-500, 500); // randomize so next pulse check is between .5 - 1.5s from end
     return;
   }
 
