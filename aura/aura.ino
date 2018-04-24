@@ -6,6 +6,7 @@
 
 #define DEVICE_NAME               ("A U R A")
 #define SECOND_MS                 (1000)
+#define IIR_COEFF                 (5)
 #define RSSI_LIM                  (-70)
 #define DELTA_TIME_LIM_MS         (10000)
 
@@ -38,7 +39,7 @@ Adafruit_NeoPixel neopixels = Adafruit_NeoPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NE
 
 // Bluefruit
 unsigned long bluefruit_last_dev_found_t;
-int8_t bluefruit_last_dev_found_rssi;
+int8_t bluefruit_filtered_rssi;
 void bluefruit_start_adv(void);
 void bluefruit_scan_callback(ble_gap_evt_adv_report_t* report);
 
@@ -73,7 +74,7 @@ void setup()
   Bluefruit.autoConnLed(false);
 
   bluefruit_last_dev_found_t = millis();
-  bluefruit_last_dev_found_rssi = 0;
+  bluefruit_filtered_rssi = 0;
   /* Start Central Scanning
    * - Interval = 100 ms, window = 80 ms
    * - Start(timeout) with timeout = 0 will scan forever (until connected)
@@ -100,8 +101,8 @@ void loop()
           neopixel_pulse_states[i].last_rand_check = cur_time;
           if (random(0, 100) < PULSE_START_PERCENT * 100) {
             int16_t blue_val = 255;
-            if (bluefruit_last_dev_found_rssi < RSSI_LIM) {
-              int8_t rssi_diff = RSSI_LIM - bluefruit_last_dev_found_rssi;
+            if (bluefruit_filtered_rssi < RSSI_LIM) {
+              int8_t rssi_diff = RSSI_LIM - bluefruit_filtered_rssi;
               Serial.printf("RSSI_DIFF %d\r\n", rssi_diff);
               blue_val -= rssi_diff * 10;
             }
@@ -113,10 +114,10 @@ void loop()
               blue_val -= time_diff * 0.005;
             }
 
-            Serial.printf("bv %d\r\n", blue_val);
             if (blue_val < 0) {
               blue_val = 0;
             }
+            Serial.printf("bv %d\r\n", blue_val);
             uint8_t rand_color = random(0, 255);
             neopixel_pulse_states[i].pulse_color[0] = 255 - blue_val;
             neopixel_pulse_states[i].pulse_color[1] = 0;
@@ -157,9 +158,9 @@ void bluefruit_scan_callback(ble_gap_evt_adv_report_t* report)
   {
     if (String((char *)buffer).indexOf(DEVICE_NAME) >= 0) {
       unsigned long time_found = millis();
-      Serial.printf("Found %s with RSSI: %d, last seen %lu ms ago. Time is %lu\r\n", DEVICE_NAME, report->rssi, time_found - bluefruit_last_dev_found_t, time_found);
       bluefruit_last_dev_found_t = time_found;
-      bluefruit_last_dev_found_rssi = report->rssi;
+      rssi_iir_filter(&bluefruit_filtered_rssi, report->rssi);
+      Serial.printf("Found %s with RSSI: %d, Filtered RSSI is %d.\r\n", DEVICE_NAME, report->rssi, bluefruit_filtered_rssi);
     }
   }
 }
@@ -190,4 +191,9 @@ void neopixel_pulse_update(Adafruit_NeoPixel* neopixels, struct neopixel_pulse_s
   uint8_t new_g = breath_percent * pulse_state->pulse_color[1];
   uint8_t new_b = breath_percent * pulse_state->pulse_color[2];
   neopixels->setPixelColor(pulse_state->neopixel_num, neopixels->Color(new_r, new_g, new_b));
+}
+
+static void rssi_iir_filter(int8_t *average, int8_t new_val)
+{
+  *average = ((*average * (IIR_COEFF - 1)) + new_val) / IIR_COEFF;
 }
